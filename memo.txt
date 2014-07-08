@@ -1,0 +1,284 @@
+디컴파일로 만들기
+목표: 씨언어책에 나오는 모든 코드 디컴파일 가능
+타겟 gcc x86 centos 코드최적화 제로
+
+IR 이라는 중간언어가 필요
+http://cs.lmu.edu/~ray/notes/ir/
+에서 중간언어로 바꿔야 하는듯 싶다
+
+	* High-level — looks a lot like the source language. May include structured objects like arrays and structs.
+	* Medium-level — No structured objects, but still target language independent
+	* Low-level — Extremely close to target languag
+
+
+언어설계를 튜플의 조합으로 하면 어떨까
+(COPY, 0, i)                        i := 0
+(LABEL, L1)                    L1:
+(JGE, i, n, L2)                     if i >= n goto L2
+(MUL, i, 80, t0)                    t0 := i * 80
+(ADD, a, t0, t1)                    t1 := a + t0
+(ADD, j, 2, t2)                     t2 := j + 2
+(MUL, t2, 8, t3)                    t3 := t2 * 8
+(ADD, t1, t3, t4)                   t4 := t1 + t3
+(COPY_TO_DEREF, j, t4)              *t4 := j
+(ADD, i, di, i)                     i := i + di
+(JUMP, L1)                          goto L1
+(LABEL, L2)                    L2:
+
+옵션:
+-fno-stack-protector -O0 -m32
+
+; Segment type: Pure code
+; Segment permissions: Read/Execute
+_text segment para public 'CODE' use32
+assume cs:_text
+;org 8048310h
+assume es:nothing, ss:nothing, ds:_data, fs:nothing, gs:nothing
+
+
+; Attributes: noreturn
+
+public _start
+_start proc near
+xor     ebp, ebp
+pop     esi
+mov     ecx, esp
+and     esp, 0FFFFFFF0h
+push    eax
+push    esp
+push    edx
+push    offset __libc_csu_fini
+push    offset __libc_csu_init
+push    ecx
+push    esi
+push    offset main
+call    ___libc_start_main
+hlt
+_start endp
+
+
+
+public main
+main proc near
+push    ebp
+mov     ebp, esp
+and     esp, 0FFFFFFF0h
+sub     esp, 20h
+mov     dword ptr [esp+1Ch], 0Ah
+mov     eax, offset format ; "a : %d \n"
+mov     edx, [esp+1Ch]
+mov     [esp+4], edx
+mov     [esp], eax      ; format
+call    _printf
+mov     eax, 0
+leave
+retn
+main end
+
+
+
+코드 부분 체크하는 법
+코드 체크는 disas.py 에서 한다
+분석하는 부분의 범위는 분석한리스트에 저장
+만약 jcc 나 call 을 만나게 될경우 그 부분을 추가분석리스트에 추가한다
+그리고 ret을 만날경우 무조건 함수의 끝으로 판단한다
+그 후 추가분석리스트와 분석한 리스트를 비교해서 추가분석리스트에 있는것중 분석한 애들을 제거(완전히 들어간 경우만)
+그후 추가분석 리스트 하나를 가져와 분석
+
+IR은 IR변환만 ㅇㅋ?
+ret 을 마지막으로 한다
+
+
+    x ← y                        x ← y[i]
+    x ← &y                       x[i] ← y
+    x ← *y                       goto L
+    *x ← y                       if x relop y goto L
+    x ← unaryop y                param x
+    x ← y binaryop z             call p, n
+
+    unaryop is one of: +, -, !, ~, ...
+    binaryop is one of: +, -, *, /, %, &, |, ^, ., &&, ||, ...
+    relop is one of ==, !=, <, <=, >, >=
+    x[i] means i memory location x + i
+    call p,n means call p with n bytes of arguments
+
+
+
+['push', 0, 'ebp']
+['mov', 4, 'ebp', 'esp']
+['and', 4, 'esp', 4294967280L]
+['sub', 4, 'esp', 32]
+['movcalc', 36, 'tmp1', 0, 1, 'esp', 28L]
+['movpf', 36, 'tmp1', 10, 32]
+['mov', 36, 'eax', 134513860]
+['movcalc', 36, 'tmp1', 0, 1, 'esp', 28L]
+['movfp', 36, 'edx', 'tmp1']
+
+['movcalc', 36, 'tmp1', 0, 1, 'esp', 4L]
+['movpf', 36, 'tmp1', 'edx']
+['movcalc', 36, 'tmp1', 0, 1, 'esp', 0L]
+['movpf', 36, 'tmp1', 'eax']
+['call', 36, 'printf']
+['mov', 36, 'eax', 0]
+['ret', 36]
+
+목표:
+int v1=10; //tmp1@1=*(0*1+esp+28)
+int v2=134513860; //eax@1
+int v3=v1; //edx@1
+int v4=v3;
+int v5=v2;
+printf(v5,v4);
+
+['push', 'ebp']
+['mov', 'ebp', 'esp']
+['and', 'esp', 4294967280L]
+['sub', 'esp', 32]
+//int s1,s2,s3,s4,s5,s6,s7,s8=0;
+
+['movcalc', 'tmp1', 0, 1, 'esp', 28L]
+//v1=0*1+esp+28
+['movpf', 'tmp1', 10, 32]
+//*v1=10
+['mov', 'eax', 134513860]
+//v2=134513860
+['movcalc', 'tmp1', 0, 1, 'esp', 28L]
+//v3=0*1+esp+28
+['movfp', 'edx', 'tmp1']
+//v4=*v3 //movfp v4,v3
+['movcalc', 'tmp1', 0, 1, 'esp', 4L]
+//v5=0*1+esp+4
+['movpf', 'tmp1', 'edx']
+//*v5=v4
+['movcalc', 'tmp1', 0, 1, 'esp', 0L]
+//v6=0*1+esp+0
+['movpf', 'tmp1', 'eax']
+//*v6=v2
+['call', 'printf']
+//printf(v6,v5)
+['mov', 'eax', 0]
+//v7=0
+['ret']
+//return v7
+
+
+[esp(sp),tmp1,tmp2,,eax,ebx,ecx,edx,edi,esi,ebp]
+#stack=[[sp=0x4,'v1'],[sp=0x8,'v2']]
+stack=[[],[],[],[],[],[],[],[],[],[],[],[]]
+
+
+"esp","tmp1","tmp2","eax","ebx","ecx","edx","edi","esi","ebp"
+
+
+[opcode,regs,stack,arguments]
+regs=[esp(sp),tmp1,tmp2,eax,ebx,ecx,edx,edi,esi,ebp]
+stack=[,,,,,,]
+
+['push', 'ebp']
+['mov', 'ebp', 'esp']
+['and', 'esp', 4294967280L]
+['sub', 'esp', 32]
+
+['movcalc', 'v1', 0, 1, 'esp', 28L]
+['movpf', 'v1', 10, 32]
+//stack[len(stack)-28/4]=10
+
+['mov', 'v2', 134513860]
+
+['movcalc', 'v3', 0, 1, 'esp', 28L]
+['movfp', 'edx', 'v3']
+//edx=stack[len(stack)-28/4]
+
+
+['movcalc', 'v4', 0, 1, 'esp', 4L]
+['movpf', 'v4', 'edx']
+//stack[len(stack)-4/4]=edx
+
+['movcalc', 'v5', 0, 1, 'esp', 0L]
+['movpf', 'v5', 'eax']
+//stack[len(stack)-0/4]=eax
+
+['call', 'printf']
+['mov', 'v6', 0]
+['ret']
+
+
+['push', 'ebp']
+['mov', 'ebp', 'esp']
+['and', 'esp', 4294967280L]
+['sub', 'esp', 32]
+['movcalc', 'v1', 0, 1, 'esp', 28L]
+['movpf', 'v1', 10, 32]
+['mov', 'v2', 134513860]
+['movcalc', 'v3', 0, 1, 'esp', 28L]
+['movfp', 'edx', 'v3']
+['movcalc', 'v4', 0, 1, 'esp', 4L]
+['movpf', 'v4', 'edx']
+['movcalc', 'v5', 0, 1, 'esp', 0L]
+['movpf', 'v5', 'v2']
+['call', 'printf']
+['mov', 'v6', 0]
+['ret']
+
+
+['push', 'ebp']
+['mov', 'ebp', 'esp']
+['and', 'esp', 4294967280L]
+['sub', 'esp', 32]
+['movcalc', 'v1', 0, 1, 'esp', 28L]
+['movpf', 'v1', 10, 32]
+['mov', 'v2', 134513860]
+['movcalc', 'v3', 0, 1, 'esp', 28L]
+['movfp', 'edx', 'v3']
+['movcalc', 'v4', 0, 1, 'esp', 4L]
+['movpf', 'v4', 'v5']
+['movcalc', 'v6', 0, 1, 'esp', 0L]
+['movpf', 'v6', 'v2']
+['call', 'printf']
+['mov', 'v7', 0]
+['ret']
+
+
+
+['push', 'ebp']
+['mov', 'ebp', 'esp']
+['and', 'esp', 4294967280L]
+['sub', 'esp', 32]
+
+['movcalc', 'v1', 0, 1, 'esp', 28L]
+['movpf', 'v1', 10, 32]
+//['save2stack',len(stack)-28/4,10]
+
+['mov', 'v2', 134513860]
+//v2=134513860
+
+['movcalc', 'v3', 0, 1, 'esp', 28L]
+['movfp', 'v4', 'v3']
+//['savefstack',v4,len(stack)-28/4(=10)]
+
+['movcalc', 'v5', 0, 1, 'esp', 4L]
+['movpf', 'v5', 'v4']
+//['save2stack',len(stack)-4/4,v4(=10)]
+//['save2stack',1,'v4']
+
+['movcalc', 'v6', 0, 1, 'esp', 0L]
+['movpf', 'v6', 'v2']
+//['save2stack',len(stack)-0/4,v2(=134513860)]
+
+['call', 'printf']
+['mov', 'v7', 0]
+['ret']
+
+
+
+['push', 'ebp']
+['mov', 'ebp', 'esp']
+['and', 'esp', 4294967280L]
+['sub', 'esp', 32]
+['save2stack', 's7', 10]
+['mov', 'v2', 134513860]
+['savefstack', 'v4', 's7']
+['save2stack', 's1', 'v4']
+['save2stack', 's0', 'v2']
+['call', 'printf']
+['mov', 'v7', 0]
